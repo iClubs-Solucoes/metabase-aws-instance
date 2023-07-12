@@ -1,0 +1,112 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Parameters:
+  VpcId:
+    Type: String
+  SubnetId:
+    Type: String
+  AmiId:
+    Type: AWS::EC2::Image::Id
+    Default: ami-0c6a6b0e75b2b6ce7
+  InstanceType:
+    Type: String
+    Default: t2.micro
+  SgInitIp:
+    Type: String
+  InstanceName:
+    Type: String
+  AccountNumber:
+    Type: String
+    
+Resources:
+  Ec2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub Ec2Role-${InstanceName}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: ec2.amazonaws.com
+          Action: sts:AssumeRole
+      Path: /
+      Policies:
+      - PolicyName: PermissionToAssumeRole
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Sid: PermissionToAssume
+            Effect: Allow
+            Action: sts:AssumeRole
+            Resource: arn:aws:iam::*:*
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      
+  HTTPSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub EC2SG-${InstanceName}
+      GroupDescription: Enable HTTP access via port 80
+      VpcId:
+        Ref: VpcId
+      SecurityGroupIngress:
+      - CidrIp: !Sub ${SgInitIp}/32
+        FromPort: 8080
+        IpProtocol: tcp
+        ToPort: 8080
+        
+  Ec2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub Ec2InstanceProfile-${InstanceName}
+      Path: /
+      Roles: 
+        - !Ref Ec2Role
+      
+  Ec2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: !Ref InstanceType
+      BlockDeviceMappings:
+      - DeviceName: /dev/xvda
+        Ebs:
+          VolumeType: gp2
+          VolumeSize: 8
+          DeleteOnTermination: true
+          Encrypted: true
+      NetworkInterfaces:
+      - AssociatePublicIpAddress: true
+        DeviceIndex: '0'
+        GroupSet:
+        - !Ref HTTPSecurityGroup
+        SubnetId: !Ref SubnetId
+      IamInstanceProfile: !Ref Ec2InstanceProfile
+      UserData: !Base64
+          'Fn::Sub': |  
+            #!/bin/bash
+            sudo yum install -y https://s3.${AWS::Region}.amazonaws.com/amazon-ssm-${AWS::Region}/latest/linux_amd64/amazon-ssm-agent.rpm
+            sudo yum update -y
+            sudo yum upgrade -y
+            sudo git config --global credential.helper '!aws codecommit credential-helper $@'
+            sudo git config --global credential.UseHttpPath true
+      Tags:
+      - Key: Name
+        Value: !Ref InstanceName
+  Ec2TrustPolicyRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: Ec2TrustPolicyRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS:
+                - !Sub arn:aws:iam::${AccountNumber}:root
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess   
