@@ -1,28 +1,49 @@
 AWSTemplateFormatVersion: '2010-09-09'
 
 Parameters:
-  VpcId:
+  EC2VpcId:
     Type: String
-  SubnetId:
+  EC2SubnetId:
     Type: String
-  AmiId:
+  EC2AmiId:
     Type: AWS::EC2::Image::Id
     Default: ami-0c6a6b0e75b2b6ce7
-  InstanceType:
+  EC2InstanceType:
     Type: String
     Default: t2.micro
-  SgInitIp:
+  EC2SGPrefixList:
     Type: String
-  InstanceName:
+    Default: pl-b6a144df
+  Stage:
     Type: String
-  AccountNumber:
+    AllowedPattern: "^[a-zA-Z]((?!--)[a-zA-Z0-9-])*[a-zA-Z0-9]$"
+  Tenant:
     Type: String
-    
+    AllowedPattern: "^[a-zA-Z]((?!--)[a-zA-Z0-9-])*[a-zA-Z0-9]$"
+  ProjectName:
+    Type: String
+    AllowedPattern: "^[a-zA-Z]((?!--)[a-zA-Z0-9-])*[a-zA-Z0-9]$"
+  HostedZoneId:
+    Type: String
+  MetabaseURL:
+    Type: String
+  CertificateArn:
+    Type: String
+  metabasePostgresPassword:
+    Type: String
+    AllowedPattern: "^[a-zA-Z]((?!--)[a-zA-Z0-9-])*[a-zA-Z0-9]$"
+    NoEcho: true
+  metabaseUserPassword:
+    Type: String
+    AllowedPattern: "^[a-zA-Z]((?!--)[a-zA-Z0-9-])*[a-zA-Z0-9]$"
+    NoEcho: true
+
+
 Resources:
   Ec2Role:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub Ec2Role-${InstanceName}
+      RoleName: !Sub Ec2Role-${Stage}-${Tenant}-${ProjectName}
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -46,29 +67,29 @@ Resources:
   HTTPSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupName: !Sub EC2SG-${InstanceName}
-      GroupDescription: Enable HTTP access via port 80
+      GroupName: !Sub EC2SG-${Stage}-${Tenant}-${ProjectName}
+      GroupDescription: Enable HTTP access via port 80 to CDN only
       VpcId:
-        Ref: VpcId
+        Ref: EC2VpcId
       SecurityGroupIngress:
-      - CidrIp: !Sub ${SgInitIp}/32
-        FromPort: 8080
+      - SourcePrefixListId: !Ref EC2SGPrefixList
+        FromPort: 80
         IpProtocol: tcp
-        ToPort: 8080
+        ToPort: 80
         
-  Ec2InstanceProfile:
+  MetabaseEc2InstanceProfile:
     Type: AWS::IAM::InstanceProfile
     Properties:
-      InstanceProfileName: !Sub Ec2InstanceProfile-${InstanceName}
+      InstanceProfileName: !Sub MetabaseEc2InstanceProfile-${Stage}-${Tenant}-${ProjectName}
       Path: /
       Roles: 
         - !Ref Ec2Role
       
-  Ec2Instance:
+  MetabaseEc2Instance:
     Type: AWS::EC2::Instance
     Properties:
-      ImageId: !Ref AmiId
-      InstanceType: !Ref InstanceType
+      ImageId: !Ref EC2AmiId
+      InstanceType: !Ref EC2InstanceType
       BlockDeviceMappings:
       - DeviceName: /dev/xvda
         Ebs:
@@ -81,32 +102,150 @@ Resources:
         DeviceIndex: '0'
         GroupSet:
         - !Ref HTTPSecurityGroup
-        SubnetId: !Ref SubnetId
-      IamInstanceProfile: !Ref Ec2InstanceProfile
+        SubnetId: !Ref EC2SubnetId
+      IamInstanceProfile: !Ref MetabaseEc2InstanceProfile
       UserData: !Base64
           'Fn::Sub': |  
             #!/bin/bash
             sudo yum install -y https://s3.${AWS::Region}.amazonaws.com/amazon-ssm-${AWS::Region}/latest/linux_amd64/amazon-ssm-agent.rpm
             sudo yum update -y
             sudo yum upgrade -y
+
+            sudo yum install git -y
+            sudo yum install jq -y
+
             sudo git config --global credential.helper '!aws codecommit credential-helper $@'
             sudo git config --global credential.UseHttpPath true
+
+            sudo yum -y install docker
+            sudo systemctl enable docker.service
+            sudo systemctl start docker.service
+            sudo amazon-linux-extras enable postgresql14
+            sudo yum install postgresql-server -y
+            sudo postgresql-setup initdb
+            sudo systemctl start postgresql
+            sudo systemctl enable postgresql
+            sudo -u postgres psql -c "ALTER USER postgres PASSWORD '${metabasePostgresPassword}';"
+
+            mkdir ~/.ssh
+            touch ~/.ssh/known_hosts
+            cd ~/
+            ssh-keyscan -t rsa github.com | tee github-key-temp | ssh-keygen -lf -
+            cat github-key-temp >> ~/.ssh/known_hosts
+            mkdir git
+            cd git
+            mkdir iclubs.io
+            cd iclubs.io/
+            git clone https://github.com/iClubs-Solucoes/metabase-aws-instance.git
+
+            cd metabase-aws-instance/
+            git checkout main
+
+            sudo cp /var/lib/pgsql/data/postgresql.conf /var/lib/pgsql/data/postgresql.conf.bkp
+            sudo cp ./confFiles/postgresql.conf /var/lib/pgsql/data/postgresql.conf
+
+            sudo cp /var/lib/pgsql/data/pg_hba.conf /var/lib/pgsql/data/pg_hba.conf.bkp
+            sudo cp ./confFiles/pg_hba.conf /var/lib/pgsql/data/pg_hba.conf
+
+            sudo systemctl restart postgresql
+
+            sudo -u postgres psql -c "CREATE USER metabase WITH PASSWORD '${metabaseUserPassword}'"
+            sudo -u postgres psql -c "ALTER USER metabase WITH SUPERUSER;"
+            sudo -u postgres psql -c "CREATE DATABASE metabase;"
+
+            myPrivateIp=$(hostname -i)
+
+            sudo docker run -d -p 80:3000 -e "MB_DB_TYPE=postgres" -e "MB_DB_DBNAME=metabase" -e "MB_DB_PORT=5432" -e "MB_DB_USER=metabase" -e "MB_DB_PASS=${metabaseUserPassword}" -e "MB_DB_HOST=$myPrivateIp" -e "MB_REDIRECT_ALL_REQUESTS_TO_HTTPS=false" -e "MB_SITE_URL=https://${MetabaseURL}" --name metabase metabase/metabase
+
+            sudo touch  /etc/systemd/system/metabase.service
+            sudo chmod 755 /etc/systemd/system/metabase.service
+
+            echo "[Unit]" | sudo tee -a /etc/systemd/system/metabase.service
+            echo "Description=Metabase" | sudo tee -a /etc/systemd/system/metabase.service
+            echo "[Service]" | sudo tee -a /etc/systemd/system/metabase.service
+            echo "Type=oneshot" | sudo tee -a /etc/systemd/system/metabase.service
+            echo "RemainAfterExit=true" | sudo tee -a /etc/systemd/system/metabase.service
+            echo "ExecStart=/usr/bin/docker start /metabase" | sudo tee -a /etc/systemd/system/metabase.service
+            echo "ExecStop=/usr/bin/docker stop /metabase" | sudo tee -a /etc/systemd/system/metabase.service
+            echo "[Install]" | sudo tee -a /etc/systemd/system/metabase.service
+            echo "WantedBy=multi-user.target" | sudo tee -a /etc/systemd/system/metabase.service
+
+            sudo chkconfig metabase on
+            sudo systemctl enable metabase
+
       Tags:
       - Key: Name
-        Value: !Ref InstanceName
+        Value: !Ref ProjectName
+  
+  MetabaseElasticIP:
+      Type: AWS::EC2::EIP
+      Properties:
+        Domain: vpc
+        InstanceId: !Ref MetabaseEc2Instance 
+
   Ec2TrustPolicyRole:
     Type: 'AWS::IAM::Role'
     Properties:
-      RoleName: Ec2TrustPolicyRole
+      RoleName: !Sub Ec2TrustPolicyRole-${Stage}-${Tenant}-${ProjectName}
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
           - Effect: Allow
             Principal:
               AWS:
-                - !Sub arn:aws:iam::${AccountNumber}:root
+                - !Sub arn:aws:iam::${AWS::AccountId}:root
             Action:
               - 'sts:AssumeRole'
       Path: /
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AdministratorAccess   
+
+  
+
+  ContentCDN:
+    Type: "AWS::CloudFront::Distribution"
+    DependsOn: MetabaseElasticIP
+    Properties:
+      DistributionConfig:
+        Comment: !Sub "CDN for ${Stage}-${Tenant}-${ProjectName} Content"
+        Enabled: true
+        HttpVersion: http2
+        Aliases:
+          - !Ref MetabaseURL
+        ViewerCertificate:
+          AcmCertificateArn: !Ref CertificateArn
+          MinimumProtocolVersion: TLSv1.2_2019
+          SslSupportMethod: sni-only
+        DefaultCacheBehavior:
+          AllowedMethods: 
+           - GET
+           - HEAD
+           - OPTIONS
+           - PUT
+           - PATCH
+           - POST
+           - DELETE
+          Compress: true
+          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+          OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3
+          TargetOriginId: metabase-origin
+          ViewerProtocolPolicy: redirect-to-https          
+        Origins:
+          - CustomOriginConfig:
+              HTTPPort: 80
+              OriginProtocolPolicy: http-only
+            DomainName: !GetAtt MetabaseEc2Instance.PublicDnsName
+            Id: metabase-origin
+
+
+
+  DNSRecordForCDN:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId : !Ref HostedZoneId
+      Name: !Ref MetabaseURL
+      AliasTarget:
+        DNSName: !GetAtt ContentCDN.DomainName
+        EvaluateTargetHealth: false
+        HostedZoneId: Z2FDTNDATAQYW2
+      Type: A
