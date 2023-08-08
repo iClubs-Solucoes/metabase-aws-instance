@@ -16,13 +16,13 @@ Parameters:
     Default: pl-b6a144df
   Stage:
     Type: String
-    AllowedPattern: "^[a-zA-Z]((?!--)[a-zA-Z0-9-])*[a-zA-Z0-9]$"
+    AllowedPattern: "^[a-z]((?!--)[a-z0-9-])*[a-z0-9]$"
   Tenant:
     Type: String
-    AllowedPattern: "^[a-zA-Z]((?!--)[a-zA-Z0-9-])*[a-zA-Z0-9]$"
+    AllowedPattern: "^[a-z]((?!--)[a-z0-9-])*[a-z0-9]$"
   ProjectName:
     Type: String
-    AllowedPattern: "^[a-zA-Z]((?!--)[a-zA-Z0-9-])*[a-zA-Z0-9]$"
+    AllowedPattern: "^[a-z]((?!--)[a-z0-9-])*[a-z0-9]$"
   HostedZoneId:
     Type: String
   MetabaseURL:
@@ -155,7 +155,7 @@ Resources:
 
             myPrivateIp=$(hostname -i)
 
-	    sudo docker pull metabase/metabase:latest
+            sudo docker pull metabase/metabase:latest
             sudo docker run -d -p 80:3000 --cpus="0.8" --restart=always --memory="850m" -e "MB_DB_TYPE=postgres" -e "MB_DB_DBNAME=metabase" -e "MB_DB_PORT=5432" -e "MB_DB_USER=metabase" -e "MB_DB_PASS=${metabaseUserPassword}" -e "MB_DB_HOST=$myPrivateIp" -e "MB_REDIRECT_ALL_REQUESTS_TO_HTTPS=false" -e "MB_SITE_URL=https://${MetabaseURL}" --name metabase metabase/metabase
 
             sudo touch  /etc/systemd/system/metabase.service
@@ -201,7 +201,19 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AdministratorAccess   
 
-  
+  ErrorBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "error-bucket-${Stage}-${Tenant}-${ProjectName}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+        - ServerSideEncryptionByDefault:
+            SSEAlgorithm: AES256
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders: ["*"]
+            AllowedMethods: ["GET", "HEAD"]
+            AllowedOrigins: ["https://*.cloudfront.net"]
 
   ContentCDN:
     Type: "AWS::CloudFront::Distribution"
@@ -230,13 +242,31 @@ Resources:
           CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
           OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3
           TargetOriginId: metabase-origin
-          ViewerProtocolPolicy: redirect-to-https          
+          ViewerProtocolPolicy: redirect-to-https           
+        CacheBehaviors:
+          - PathPattern: "error/*"
+            TargetOriginId: errorBucketOrigin
+            ForwardedValues:
+              QueryString: 'false'
+            ViewerProtocolPolicy: redirect-to-https       
+        CustomErrorResponses:
+          - ErrorCode: 502
+            ResponsePagePath: /error/error.html
+            ResponseCode: 502
+            ErrorCachingMinTTL: 300
+          - ErrorCode: 504
+            ResponsePagePath: /error/error.html
+            ResponseCode: 504
+            ErrorCachingMinTTL: 300
         Origins:
           - CustomOriginConfig:
               HTTPPort: 80
               OriginProtocolPolicy: http-only
             DomainName: !GetAtt MetabaseEc2Instance.PublicDnsName
             Id: metabase-origin
+          - DomainName: !GetAtt [ErrorBucket, DomainName]
+            Id: errorBucketOrigin
+            S3OriginConfig: {}
 
 
 
