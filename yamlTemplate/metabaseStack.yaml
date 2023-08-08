@@ -155,7 +155,8 @@ Resources:
 
             myPrivateIp=$(hostname -i)
 
-            sudo docker run -d -p 80:3000 -e "MB_DB_TYPE=postgres" -e "MB_DB_DBNAME=metabase" -e "MB_DB_PORT=5432" -e "MB_DB_USER=metabase" -e "MB_DB_PASS=${metabaseUserPassword}" -e "MB_DB_HOST=$myPrivateIp" -e "MB_REDIRECT_ALL_REQUESTS_TO_HTTPS=false" -e "MB_SITE_URL=https://${MetabaseURL}" --name metabase metabase/metabase
+	    sudo docker pull metabase/metabase:latest
+            sudo docker run -d -p 80:3000 --cpus="0.8" --restart=always --memory="850m" -e "MB_DB_TYPE=postgres" -e "MB_DB_DBNAME=metabase" -e "MB_DB_PORT=5432" -e "MB_DB_USER=metabase" -e "MB_DB_PASS=${metabaseUserPassword}" -e "MB_DB_HOST=$myPrivateIp" -e "MB_REDIRECT_ALL_REQUESTS_TO_HTTPS=false" -e "MB_SITE_URL=https://${MetabaseURL}" --name metabase metabase/metabase
 
             sudo touch  /etc/systemd/system/metabase.service
             sudo chmod 755 /etc/systemd/system/metabase.service
